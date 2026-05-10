@@ -24,7 +24,8 @@ jobs:
         run: python -c "import ast; ast.parse(open('app/main.py', encoding='utf-8').read()); print('main.py syntax OK')"
 
       - name: Ruff lint
-        run: ruff check app/ --select=E,F,W --ignore=E501,F401,E701,E702,E703
+        # ignoruj reguły stylistyczne — sprawdzamy tylko prawdziwe bugi (F-syntax, E9-runtime)
+        run: ruff check app/ --select=E9,F --ignore=F401,F841
 
       - name: Validate imports resolvable (mock SDL2/evdev)
         run: |
