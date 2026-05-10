@@ -392,6 +392,13 @@ class WifiApp:
         self.do_scan()
 
     def run(self):
+        # POWER button → wygaszanie ekranu bez zamykania apki
+        try:
+            from power_screen import ScreenPowerToggle
+            self._screen_pwr = ScreenPowerToggle()
+        except Exception:
+            self._screen_pwr = None
+
         # początkowy skan
         self.render()
         self.do_scan()
@@ -404,6 +411,14 @@ class WifiApp:
         while True:
             now = sdl2.SDL_GetTicks()
             guard = (now - start_ms) < GUARD_MS
+
+            # POWER button — toggle ekranu (nie zamyka)
+            if self._screen_pwr is not None:
+                self._screen_pwr.poll()
+                self._screen_pwr.tick(now)
+                if self._screen_pwr.is_off:
+                    sdl2.SDL_Delay(50)
+                    continue
 
             # evdev events
             if self._gp:
@@ -548,6 +563,8 @@ class WifiApp:
 
     def quit(self):
         log('quit')
+        if getattr(self, '_screen_pwr', None) is not None:
+            self._screen_pwr.restore()
         if self._gp:
             try: self._gp.ungrab()
             except Exception: pass
