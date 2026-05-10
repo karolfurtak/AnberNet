@@ -58,7 +58,7 @@ jobs:
         run: shellcheck --severity=error cli/wifi
 
       - name: Shellcheck launcher
-        run: shellcheck --severity=error app/Anbernet.sh
+        run: shellcheck --severity=error app/AnberNet.sh
 
       - name: Shellcheck installer
         run: shellcheck --severity=error scripts/install.sh
@@ -66,5 +66,5 @@ jobs:
       - name: Bash syntax — szybki -n test
         run: |
           bash -n cli/wifi
-          bash -n app/Anbernet.sh
+          bash -n app/AnberNet.sh
           bash -n scripts/install.sh

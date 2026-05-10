@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Anbernet — apka SDL2 do zarządzania WiFi na Anbernic RG40XX V.
+"""AnberNet — apka SDL2 do zarządzania WiFi na Anbernic RG40XX V.
 
-GitHub: https://github.com/karolfurtak/Anbernet
+GitHub: https://github.com/karolfurtak/AnberNet
 """
 import os, sys, subprocess, ctypes, time
 from pathlib import Path
@@ -154,7 +154,7 @@ class WifiApp:
         sdl2.SDL_Init(sdl2.SDL_INIT_VIDEO | sdl2.SDL_INIT_EVENTS)
 
         self.win = sdl2.SDL_CreateWindow(
-            b"Anbernet", sdl2.SDL_WINDOWPOS_UNDEFINED, sdl2.SDL_WINDOWPOS_UNDEFINED,
+            b"AnberNet", sdl2.SDL_WINDOWPOS_UNDEFINED, sdl2.SDL_WINDOWPOS_UNDEFINED,
             0, 0, sdl2.SDL_WINDOW_FULLSCREEN_DESKTOP | sdl2.SDL_WINDOW_SHOWN
         )
         self.ren = sdl2.SDL_CreateRenderer(self.win, -1, sdl2.SDL_RENDERER_SOFTWARE) \
@@ -205,7 +205,7 @@ class WifiApp:
         d.rectangle([(0, 0), (W, H)], fill=BG)
 
         # nagłówek
-        self._text(8, 6, '⬡ Anbernet', self.flg, ACC)
+        self._text(8, 6, '⬡ AnberNet', self.flg, ACC)
         ip = current_ip()
         ip_str = f'IP: {ip}' if ip else 'IP: brak'
         tw = self.fmd.getlength(ip_str)

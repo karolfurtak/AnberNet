@@ -1,4 +1,4 @@
-# Anbernet
+# AnberNet
 
 Lekka apka SDL2 do zarządzania WiFi na **Anbernic RG40XX V** (Allwinner H700, stock Ubuntu 22.04 firmware) — sterowana D-padem, integruje się z App Center, ma on-screen klawiaturę dla wpisywania haseł oraz obsługę BT klawiatury.
 
@@ -94,18 +94,18 @@ pip install pysdl2 evdev Pillow
 ## Instalacja
 
 ```bash
-git clone https://github.com/karolfurtak/Anbernet.git
-cd Anbernet
+git clone https://github.com/karolfurtak/AnberNet.git
+cd AnberNet
 ./scripts/install.sh
 ```
 
 Skrypt:
 - kopiuje `app/main.py` do `/mnt/mmc/Roms/APPS/anbernet/main.py`
-- kopiuje launcher do `/mnt/mmc/Roms/APPS/Anbernet.sh`
-- generuje ikonę PNG do `/mnt/mmc/Roms/APPS/Imgs/Anbernet.png`
+- kopiuje launcher do `/mnt/mmc/Roms/APPS/AnberNet.sh`
+- generuje ikonę PNG do `/mnt/mmc/Roms/APPS/Imgs/AnberNet.png`
 - instaluje `cli/wifi` do `/usr/local/bin/wifi`
 
-Po instalacji **Anbernet** pojawi się w App Center na konsoli.
+Po instalacji **AnberNet** pojawi się w App Center na konsoli.
 
 ## Logi
 

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Anbernet launcher dla App Center / dmenu
+# AnberNet launcher dla App Center / dmenu
 export PYSDL2_DLL_PATH="/usr/lib"
 export HOME=/root
 export PATH="/root/.local/bin:/usr/local/bin:/usr/bin:/bin"
