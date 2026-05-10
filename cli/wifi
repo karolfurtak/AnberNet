@@ -1,0 +1,82 @@
+#!/bin/bash
+# /usr/local/bin/wifi — prosty wrapper na nmcli dla Anbernic RG40XX V
+set -e
+
+cmd="${1:-list}"
+
+case "$cmd" in
+    list|scan|l)
+        echo "Skanuję sieci WiFi..."
+        nmcli -f IN-USE,SSID,SIGNAL,BARS,SECURITY device wifi list ifname wlan0 --rescan auto
+        ;;
+
+    connect|c)
+        ssid="$2"
+        pass="$3"
+        if [ -z "$ssid" ]; then
+            echo "Użycie: wifi connect <SSID> <hasło>"
+            exit 1
+        fi
+        if [ -z "$pass" ]; then
+            # otwarta sieć
+            nmcli device wifi connect "$ssid" ifname wlan0
+        else
+            nmcli device wifi connect "$ssid" password "$pass" ifname wlan0
+        fi
+        ;;
+
+    disconnect|d)
+        nmcli device disconnect wlan0
+        ;;
+
+    reconnect|r)
+        # ponowne połączenie z aktualną siecią lub auto-pick zapisanej
+        nmcli device disconnect wlan0 2>/dev/null || true
+        sleep 1
+        nmcli device connect wlan0
+        ;;
+
+    forget|del|x)
+        ssid="$2"
+        if [ -z "$ssid" ]; then
+            echo "Użycie: wifi forget <SSID>"
+            exit 1
+        fi
+        nmcli connection delete "$ssid"
+        ;;
+
+    saved|s)
+        nmcli -t -f NAME,TYPE connection show | awk -F: '$2=="802-11-wireless"{print $1}'
+        ;;
+
+    status|info|st)
+        echo "=== wlan0 ==="
+        nmcli -t -f GENERAL.STATE,IP4.ADDRESS,IP4.GATEWAY device show wlan0 2>/dev/null
+        ssid=$(nmcli -t -f NAME connection show --active 2>/dev/null | head -1)
+        echo "Aktywna: ${ssid:-brak}"
+        sig=$(iw dev wlan0 link 2>/dev/null | grep signal | awk '{print $2,$3}')
+        echo "Sygnał: ${sig:-N/A}"
+        ;;
+
+    ip)
+        ip -4 addr show wlan0 | grep inet | awk '{print $2}'
+        ;;
+
+    *)
+        cat <<'EOF'
+wifi — zarządzanie WiFi na Anbernic
+
+Komendy:
+  wifi              lista dostępnych sieci (skan)
+  wifi connect SSID HASŁO    połącz (puste hasło = sieć otwarta)
+  wifi disconnect   rozłącz wlan0
+  wifi reconnect    ponów połączenie (auto-pick zapisanej)
+  wifi forget SSID  usuń zapisaną sieć
+  wifi saved        lista zapisanych sieci
+  wifi status       stan interfejsu, IP, sygnał
+  wifi ip           tylko adres IP
+
+Skróty: l=list, c=connect, d=disconnect, r=reconnect, x=forget, s=saved, st=status
+EOF
+        ;;
+esac
