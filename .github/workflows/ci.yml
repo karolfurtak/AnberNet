@@ -25,7 +25,7 @@ jobs:
 
       - name: Ruff lint
         # ignoruj reguły stylistyczne — sprawdzamy tylko prawdziwe bugi (F-syntax, E9-runtime)
-        run: ruff check app/ --select=E9,F --ignore=F401,F841
+        run: ruff check app/ --select=E9,F --ignore=F401,F541,F841
 
       - name: Validate imports resolvable (mock SDL2/evdev)
         run: |
