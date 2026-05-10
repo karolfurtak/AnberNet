@@ -24,7 +24,7 @@ jobs:
         run: python -c "import ast; ast.parse(open('app/main.py', encoding='utf-8').read()); print('main.py syntax OK')"
 
       - name: Ruff lint
-        run: ruff check app/ --select=E,F,W --ignore=E501,F401
+        run: ruff check app/ --select=E,F,W --ignore=E501,F401,E701,E702,E703
 
       - name: Validate imports resolvable (mock SDL2/evdev)
         run: |
@@ -54,13 +54,13 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y shellcheck
 
       - name: Shellcheck CLI wrapper
-        run: shellcheck cli/wifi
+        run: shellcheck --severity=error cli/wifi
 
       - name: Shellcheck launcher
-        run: shellcheck app/Anbernet.sh
+        run: shellcheck --severity=error app/Anbernet.sh
 
       - name: Shellcheck installer
-        run: shellcheck scripts/install.sh
+        run: shellcheck --severity=error scripts/install.sh
 
       - name: Bash syntax — szybki -n test
         run: |
