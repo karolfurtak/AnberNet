@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  lint-python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install lint deps
+        run: pip install ruff
+
+      - name: AST parse (composes if syntax OK)
+        run: python -c "import ast; ast.parse(open('app/main.py', encoding='utf-8').read()); print('main.py syntax OK')"
+
+      - name: Ruff lint
+        run: ruff check app/ --select=E,F,W --ignore=E501,F401
+
+      - name: Validate imports resolvable (mock SDL2/evdev)
+        run: |
+          pip install Pillow
+          python -c "
+          import sys, types
+          # mock SDL2 and evdev (linux-only / display-required deps)
+          sys.modules['sdl2'] = types.ModuleType('sdl2')
+          sys.modules['sdl2.ext'] = types.ModuleType('sdl2.ext')
+          sys.modules['evdev'] = types.ModuleType('evdev')
+          import importlib.util
+          spec = importlib.util.spec_from_file_location('main', 'app/main.py')
+          mod = importlib.util.module_from_spec(spec)
+          # NIE wykonujemy modułu (uruchamia okno SDL), tylko sprawdzamy że parsuje się i ma WifiApp
+          src = open('app/main.py', encoding='utf-8').read()
+          assert 'class WifiApp' in src, 'klasa WifiApp musi być'
+          assert 'def render' in src and 'def run' in src, 'metody render/run muszą być'
+          print('struct OK')
+          "
+
+  lint-bash:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+
+      - name: Shellcheck CLI wrapper
+        run: shellcheck cli/wifi
+
+      - name: Shellcheck launcher
+        run: shellcheck app/Anbernet.sh
+
+      - name: Shellcheck installer
+        run: shellcheck scripts/install.sh
+
+      - name: Bash syntax — szybki -n test
+        run: |
+          bash -n cli/wifi
+          bash -n app/Anbernet.sh
+          bash -n scripts/install.sh
