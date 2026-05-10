@@ -42,17 +42,54 @@ Z **BT klawiatury** w trybie hasła: pisz normalnie, **Enter** = połącz, **Bac
 
 ## Wymagania
 
-- Anbernic RG40XX V z stock firmware (Ubuntu 22.04 base, `dmenu.bin` jako App Center)
-- `nmcli` (NetworkManager) — domyślnie obecne
-- Python 3.10+ z bibliotekami:
-  - `pysdl2` (najczęściej wbudowane w stock firmware)
-  - `python-evdev`
-  - `pillow`
+### Hardware
 
-Jeśli `evdev` brakuje:
+- **Anbernic RG40XX V** (Allwinner H700, axp2202 PMIC, 640×480 LCD landscape)
+- inne RG40-serii **mogą działać** (kody przycisków evdev są zgodne z większością RG40xxx) — niesprawdzone
+
+### Firmware
+
+Tworzone i testowane na **stock Anbernic firmware build `20251225`** (December 25, 2025):
+- Ubuntu 22.04.x LTS (Jammy)
+- Kernel `4.9.170` (Allwinner H700 BSP)
+- App Center: `dmenu.bin` (vendor)
+- File: `/mnt/vendor/oem/version.ini` → `20251225`
+- File: `/mnt/vendor/oem/board.ini` → `RG40xxV`
+
+Inne firmware (muOS, Knulli, garlicOS) **niesprawdzone** — kody przycisków evdev mogą się różnić, NetworkManager może nie być obecny.
+
+### System packages
+
+Stock firmware już zawiera:
+
+| Pakiet | Wersja stock | Rola |
+|---|---|---|
+| `nmcli` (network-manager) | systemowy | zarządzanie WiFi |
+| `iw` | systemowy | diagnostyka WiFi |
+| `libsdl2-2.0-0` | 2.0.20 | renderer |
+| `python3` | 3.10.x | runtime |
+| `fonts-dejavu` (DejaVuSansMono.ttf) | systemowy | font UI |
+
+Jeśli czegoś brakuje:
 ```bash
-pip install evdev
+apt update
+apt install network-manager iw python3 python3-pip libsdl2-2.0-0 fonts-dejavu
 ```
+
+### Python packages
+
+| Pakiet | Wersja testowana | Rola |
+|---|---|---|
+| `pysdl2` | 0.9.17 | renderowanie GUI |
+| `evdev` | 1.6.1 | gamepad input (D-pad, A/B/X/Y, MENU) |
+| `pillow` (PIL) | 12.2.0 | rysowanie obrazów do bufora |
+
+Instalacja:
+```bash
+pip install pysdl2 evdev Pillow
+```
+
+(Wszystkie zwykle są już obecne na stock firmware — `install.sh` sprawdza i raportuje braki.)
 
 ## Instalacja
 
