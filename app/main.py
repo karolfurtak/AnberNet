@@ -80,12 +80,31 @@ def nmcli(*args, timeout=10) -> tuple:
     except Exception as e:
         return -1, '', str(e)
 
-def scan_networks() -> list:
-    """Zwraca listę dict: ssid, signal, security, in_use, saved."""
+def scan_networks(retries: int = 3) -> list:
+    """Zwraca listę dict: ssid, signal, security, in_use, saved.
+    Force rescan + retry żeby uniknąć "Brak sieci" gdy cache nmcli jest pusty/stale."""
+    import time
     saved = saved_ssids()
-    rc, out, _ = nmcli('-t', '-f', 'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list',
-                       'ifname', 'wlan0', '--rescan', 'auto', timeout=15)
+    # Upewnij się że WiFi radio włączone (gdyby user wyłączył przez NM)
+    nmcli('radio', 'wifi', 'on', timeout=5)
+    # Force świeży scan (nie polegamy na cache nmcli)
+    nmcli('device', 'wifi', 'rescan', 'ifname', 'wlan0', timeout=15)
+    # Daj 2s na zebranie wyników
+    time.sleep(2)
     nets = []
+    for attempt in range(retries):
+        rc, out, _ = nmcli('-t', '-f', 'IN-USE,SSID,SIGNAL,SECURITY', 'device', 'wifi', 'list',
+                           'ifname', 'wlan0', '--rescan', 'no', timeout=15)
+        if rc != 0:
+            time.sleep(2); continue
+        # Sprawdź czy lista nie pusta (są wpisy ze SSID)
+        has_ssids = any(len(l.split(':', 2)[1]) > 0 for l in out.splitlines() if ':' in l)
+        if has_ssids:
+            break
+        # pusta — spróbuj jeszcze raz po 2s (sieć może się jeszcze rozkręca)
+        log(f'scan attempt {attempt+1} pusty, retry...')
+        nmcli('device', 'wifi', 'rescan', 'ifname', 'wlan0', timeout=15)
+        time.sleep(2)
     if rc != 0:
         return nets
     seen = set()
@@ -275,7 +294,10 @@ class WifiApp:
         self.networks = scan_networks()
         if self.cursor >= len(self.networks):
             self.cursor = max(0, len(self.networks) - 1)
-        self.message = f'Znaleziono {len(self.networks)} sieci' if self.networks else 'Brak sieci'
+        if self.networks:
+            self.message = f'Znaleziono {len(self.networks)} sieci'
+        else:
+            self.message = 'Brak sieci — naciśnij B aby skanować ponownie'
 
     def do_connect(self):
         if not self.networks: return
