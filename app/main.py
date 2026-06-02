@@ -83,7 +83,6 @@ def nmcli(*args, timeout=10) -> tuple:
 def scan_networks(retries: int = 3) -> list:
     """Zwraca listę dict: ssid, signal, security, in_use, saved.
     Force rescan + retry żeby uniknąć "Brak sieci" gdy cache nmcli jest pusty/stale."""
-    import time
     saved = saved_ssids()
     # Upewnij się że WiFi radio włączone (gdyby user wyłączył przez NM)
     nmcli('radio', 'wifi', 'on', timeout=5)
