@@ -1,6 +1,6 @@
 # AnberNet
 
-Lekka apka SDL2 do zarządzania WiFi na **Anbernic RG40XX V** (Allwinner H700, stock Ubuntu 22.04 firmware) — sterowana D-padem, integruje się z App Center, ma on-screen klawiaturę dla wpisywania haseł oraz obsługę BT klawiatury.
+Lekka apka SDL2 do zarządzania **WiFi i Bluetooth** na **Anbernic RG40XX V** (Allwinner H700, stock Ubuntu 22.04 firmware) — sterowana D-padem, integruje się z App Center, ma on-screen klawiaturę dla wpisywania haseł oraz obsługę BT klawiatury.
 
 W zestawie też CLI `wifi` jako prosty wrapper na `nmcli` — dostępny z każdego terminala.
 
@@ -15,6 +15,14 @@ W zestawie też CLI `wifi` jako prosty wrapper na `nmcli` — dostępny z każde
 - usuwanie zapisanych sieci
 - wyświetlanie aktualnego IP
 
+**Bluetooth (zakładka, przełączanie L1/R1):**
+- lista urządzeń: połączone (✓), sparowane (★), wykryte; bezimienne nadajniki BLE przygaszone na końcu listy
+- skan otoczenia (8 s, w tle — UI nie blokuje)
+- parowanie z agentem `KeyboardDisplay`: PIN dla klawiatur BT wyświetlany dużą czcionką na ekranie
+- automatyczny `trust` po sparowaniu (urządzenie łączy się samo)
+- connect / disconnect / usuwanie sparowania
+- wszystkie operacje `bluetoothctl` w wątku roboczym + ścieżki absolutne binarek (launcher App Center ma okrojony PATH)
+
 **CLI:**
 - `wifi` — skan
 - `wifi connect <SSID> <hasło>` — połącz
@@ -23,18 +31,19 @@ W zestawie też CLI `wifi` jako prosty wrapper na `nmcli` — dostępny z każde
 
 ## Sterowanie (App)
 
-| Akcja | Lista sieci | Tryb hasła |
-|---|---|---|
-| Nawigacja | D-pad ↑↓ | D-pad ←↑↓→ |
-| Wybierz / wstaw | A | A |
-| Backspace | — | B |
-| Spacja | — | Y |
-| Shift (abc/ABC) | — | X |
-| Skanuj ponownie | B | — |
-| Zapomnij sieć | X | — |
-| Zatwierdź hasło | — | komórka **OK** w klawiaturze |
-| Anuluj | — | komórka **×** w klawiaturze |
-| Wyjście | MENU | MENU |
+| Akcja | Lista sieci | Zakładka Bluetooth | Tryb hasła |
+|---|---|---|---|
+| Nawigacja | D-pad ↑↓ | D-pad ↑↓ | D-pad ←↑↓→ |
+| Wybierz / wstaw | A (połącz/rozłącz) | A (połącz/rozłącz/paruj) | A |
+| Backspace | — | — | B |
+| Spacja | — | — | Y |
+| Shift (abc/ABC) | — | — | X |
+| Skanuj ponownie | B | B (8 s) | — |
+| Zapomnij | X (sieć) | X (sparowanie) | — |
+| Zakładka WiFi⇄BT | L1/R1 | L1/R1 | — |
+| Zatwierdź hasło | — | — | komórka **OK** |
+| Anuluj | — | — | komórka **×** |
+| Wyjście | MENU | MENU | MENU |
 
 W trybie hasła ostatni wiersz klawiatury zawiera akcje `[ABC] [SPC] [DEL] [OK] [×]` — najedź D-padem i wciśnij A.
 
@@ -65,6 +74,7 @@ Stock firmware już zawiera:
 | Pakiet | Wersja stock | Rola |
 |---|---|---|
 | `nmcli` (network-manager) | systemowy | zarządzanie WiFi |
+| `bluetoothctl` + `rfkill` (bluez) | systemowy | zakładka Bluetooth |
 | `iw` | systemowy | diagnostyka WiFi |
 | `libsdl2-2.0-0` | 2.0.20 | renderer |
 | `python3` | 3.10.x | runtime |
