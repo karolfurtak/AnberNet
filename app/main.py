@@ -165,16 +165,36 @@ def signal_bars(signal: int) -> str:
     return '░░░░'
 
 # ── bluetoothctl wrappers ───────────────────────────────────────────────────
+def _bin(name: str, *candidates: str) -> str:
+    """Launcher apek ma okrojony PATH — rozwiąż ścieżkę absolutną binarki."""
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return name
+
+BTCTL  = _bin('bluetoothctl', '/usr/bin/bluetoothctl', '/bin/bluetoothctl')
+STDBUF = _bin('stdbuf', '/usr/bin/stdbuf', '/bin/stdbuf')
+
 def btctl(*args, timeout=12) -> tuple:
     try:
-        r = subprocess.run(['bluetoothctl', *args], capture_output=True, text=True, timeout=timeout)
+        r = subprocess.run([BTCTL, *args], capture_output=True, text=True, timeout=timeout)
         return r.returncode, r.stdout.strip(), r.stderr.strip()
     except Exception as e:
         return -1, '', str(e)
 
 def bt_adapter_on() -> bool:
-    """Odblokuj rfkill + włącz adapter (health-watchdog i tak pilnuje hci0)."""
-    subprocess.run(['rfkill', 'unblock', 'bluetooth'], capture_output=True)
+    """Odblokuj rfkill + włącz adapter (health-watchdog i tak pilnuje hci0).
+    UWAGA: launcher apek ma okrojony PATH (bez /usr/sbin) — rfkill wołamy
+    po ścieżkach absolutnych, a jego brak NIE jest błędem (opcjonalny krok)."""
+    for rf in ('/usr/sbin/rfkill', '/sbin/rfkill', '/usr/bin/rfkill', 'rfkill'):
+        try:
+            subprocess.run([rf, 'unblock', 'bluetooth'],
+                           capture_output=True, timeout=5)
+            break
+        except FileNotFoundError:
+            continue
+        except Exception:
+            break
     rc, _, _ = btctl('power', 'on', timeout=8)
     return rc == 0
 
@@ -283,7 +303,7 @@ class BtPairJob(threading.Thread):
     def run(self):
         try:
             p = subprocess.Popen(
-                ['stdbuf', '-oL', 'bluetoothctl', '--timeout', '40',
+                [STDBUF, '-oL', BTCTL, '--timeout', '40',
                  '--agent', 'KeyboardDisplay', 'pair', self.mac],
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             for line in p.stdout:
