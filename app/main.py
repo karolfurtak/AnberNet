@@ -3,8 +3,7 @@
 
 GitHub: https://github.com/karolfurtak/AnberNet
 """
-import os, sys, subprocess, ctypes, time
-from pathlib import Path
+import os, subprocess, ctypes, time, threading, re
 from datetime import datetime
 
 os.environ.pop('SDL_VIDEODRIVER', None)
@@ -165,6 +164,112 @@ def signal_bars(signal: int) -> str:
     if signal > 0:   return '█░░░'
     return '░░░░'
 
+# ── bluetoothctl wrappers ───────────────────────────────────────────────────
+def btctl(*args, timeout=12) -> tuple:
+    try:
+        r = subprocess.run(['bluetoothctl', *args], capture_output=True, text=True, timeout=timeout)
+        return r.returncode, r.stdout.strip(), r.stderr.strip()
+    except Exception as e:
+        return -1, '', str(e)
+
+def bt_adapter_on() -> bool:
+    """Odblokuj rfkill + włącz adapter (health-watchdog i tak pilnuje hci0)."""
+    subprocess.run(['rfkill', 'unblock', 'bluetooth'], capture_output=True)
+    rc, _, _ = btctl('power', 'on', timeout=8)
+    return rc == 0
+
+def _parse_devices(out: str) -> dict:
+    """Linie 'Device AA:BB:.. Nazwa' -> {mac: nazwa}."""
+    d = {}
+    for line in out.splitlines():
+        p = line.strip().split(' ', 2)
+        if len(p) >= 3 and p[0] == 'Device':
+            d[p[1]] = p[2]
+        elif len(p) == 2 and p[0] == 'Device':
+            d[p[1]] = p[1]
+    return d
+
+def bt_paired() -> dict:
+    # bluez <=5.64: 'paired-devices'; nowsze: 'devices Paired'
+    for cmd in (('paired-devices',), ('devices', 'Paired')):
+        rc, out, _ = btctl(*cmd)
+        if rc == 0 and 'Device' in out:
+            return _parse_devices(out)
+    return {}
+
+def bt_is_connected(mac: str) -> bool:
+    rc, out, _ = btctl('info', mac, timeout=8)
+    return rc == 0 and 'Connected: yes' in out
+
+def bt_scan(seconds: int = 8) -> dict:
+    """Skan rozgłoszeniowy; zwraca wszystkie znane+wykryte {mac: nazwa}."""
+    btctl('--timeout', str(seconds), 'scan', 'on', timeout=seconds + 8)
+    rc, out, _ = btctl('devices')
+    return _parse_devices(out) if rc == 0 else {}
+
+def bt_devices_list() -> list:
+    """Lista dict: mac, name, paired, connected — sparowane najpierw."""
+    paired = bt_paired()
+    rc, out, _ = btctl('devices')
+    known = _parse_devices(out) if rc == 0 else {}
+    known.update(paired)
+    devs = []
+    for mac, name in known.items():
+        is_p = mac in paired
+        devs.append({'mac': mac, 'name': name, 'paired': is_p,
+                     'connected': bt_is_connected(mac) if is_p else False})
+    devs.sort(key=lambda d: (-d['connected'], -d['paired'], d['name'].lower()))
+    return devs
+
+def bt_connect(mac: str) -> tuple:
+    rc, out, err = btctl('connect', mac, timeout=20)
+    ok = rc == 0 and 'successful' in out.lower()
+    return ok, ('połączono' if ok else (err or out).split('\n')[-1][:50])
+
+def bt_disconnect(mac: str) -> tuple:
+    rc, out, err = btctl('disconnect', mac, timeout=12)
+    return rc == 0, ('rozłączono' if rc == 0 else (err or out)[:50])
+
+def bt_remove(mac: str) -> bool:
+    rc, _, _ = btctl('remove', mac, timeout=10)
+    return rc == 0
+
+class BtPairJob(threading.Thread):
+    """Parowanie w tle: bluetoothctl z agentem KeyboardDisplay. Dla klawiatur
+    BT bluez wyświetla PIN, który trzeba wpisać NA urządzeniu (i Enter) —
+    PIN łapiemy z stdout i pokazujemy na ekranie. Po sukcesie: trust."""
+    def __init__(self, mac: str):
+        super().__init__(daemon=True)
+        self.mac = mac
+        self.passkey = ''
+        self.done = False
+        self.ok = False
+        self.msg = 'paruję...'
+
+    def run(self):
+        try:
+            p = subprocess.Popen(
+                ['stdbuf', '-oL', 'bluetoothctl', '--timeout', '40',
+                 '--agent', 'KeyboardDisplay', 'pair', self.mac],
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+            for line in p.stdout:
+                log(f'bt pair: {line.rstrip()}')
+                m = re.search(r'[Pp]asskey[^0-9]*(\d{4,6})', line)
+                if m:
+                    self.passkey = m.group(1)
+                if 'Pairing successful' in line:
+                    self.ok = True
+                if 'Failed to pair' in line or 'AuthenticationFailed' in line \
+                        or 'AuthenticationCanceled' in line:
+                    self.msg = 'parowanie nieudane'
+            p.wait(timeout=5)
+        except Exception as e:
+            self.msg = f'błąd: {e}'
+        if self.ok:
+            btctl('trust', self.mac, timeout=8)
+            self.msg = 'sparowano + trust'
+        self.done = True
+
 # ── SDL App ─────────────────────────────────────────────────────────────────
 class WifiApp:
     def __init__(self):
@@ -202,12 +307,19 @@ class WifiApp:
 
         # state
         self.mode     = 'list'      # 'list' lub 'password'
+        self.tab      = 'wifi'      # 'wifi' lub 'bt' (L1/R1 przełącza)
         self.networks: list = []
         self.cursor   = 0
         self.scroll   = 0
         self.message  = 'Skanuję sieci...'
         self.busy     = False
         self.scanning = True
+        # bluetooth
+        self.bt_devices: list = []
+        self.bt_cursor  = 0
+        self.bt_scroll  = 0
+        self.bt_loaded  = False
+        self.bt_pair: BtPairJob | None = None
         # password mode
         self.pw_target_ssid = ''
         self.pw_text        = ''
@@ -222,8 +334,12 @@ class WifiApp:
         d = self.draw
         d.rectangle([(0, 0), (W, H)], fill=BG)
 
-        # nagłówek
+        # nagłówek + zakładki
         self._text(8, 6, '⬡ AnberNet', self.flg, ACC)
+        wifi_col = ACC if self.tab == 'wifi' else DIM
+        bt_col   = ACC if self.tab == 'bt' else DIM
+        self._text(170, 10, '[WiFi]', self.fmd, wifi_col)
+        self._text(232, 10, '[Bluetooth]', self.fmd, bt_col)
         ip = current_ip()
         ip_str = f'IP: {ip}' if ip else 'IP: brak'
         tw = self.fmd.getlength(ip_str)
@@ -232,6 +348,11 @@ class WifiApp:
 
         if self.mode == 'password':
             self._render_keyboard()
+            self._blit()
+            return
+
+        if self.tab == 'bt':
+            self._render_bt()
             self._blit()
             return
 
@@ -257,7 +378,6 @@ class WifiApp:
                     d.rectangle([(0, y - 2), (W, y + line_h - 4)], fill=SEL)
                 col = ACC if net['in_use'] else (GRN if net['saved'] else FG)
                 marker = '✓' if net['in_use'] else ('★' if net['saved'] else ' ')
-                lock = '🔒' if net['security'] != 'open' else '  '
                 ssid_disp = net['ssid'][:32]
                 self._text(8, y, marker, self.fmd, col)
                 self._text(28, y, ssid_disp, self.fmd, col)
@@ -270,7 +390,7 @@ class WifiApp:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
         # legenda
-        legend = 'A=połącz/rozłącz  B=skanuj  X=zapomnij  MENU=wyjście'
+        legend = 'A=połącz/rozłącz  B=skanuj  X=zapomnij  L1/R1=Bluetooth  MENU=wyjście'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
         self._blit()
@@ -286,6 +406,127 @@ class WifiApp:
         sdl2.SDL_RenderClear(self.ren)
         sdl2.SDL_RenderCopy(self.ren, self._tex, None, None)
         sdl2.SDL_RenderPresent(self.ren)
+
+    # ── Bluetooth: render + akcje ───────────────────────────────────────────
+    def _render_bt(self):
+        d = self.draw
+        list_top = 38
+        line_h   = 26
+        max_visible = (H - list_top - 60) // line_h
+
+        # tryb parowania — duży PIN na środku
+        if self.bt_pair is not None and not self.bt_pair.done:
+            self._text(W // 2 - 120, 120, 'PAROWANIE…', self.flg, YEL)
+            if self.bt_pair.passkey:
+                self._text(W // 2 - 150, 180, 'Wpisz na urządzeniu PIN:', self.fmd, FG)
+                self._text(W // 2 - 90, 220, self.bt_pair.passkey, self.flg, ACC)
+                self._text(W // 2 - 150, 270, 'i zatwierdź Enterem', self.fmd, DIM)
+            else:
+                self._text(W // 2 - 150, 180, 'Czekam na urządzenie…', self.fmd, DIM)
+            d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
+            self._text(8, H - 16, 'Parowanie w toku — poczekaj do 40 s', self.fsm, DIM)
+            return
+
+        if not self.bt_devices:
+            txt = self.message or 'Brak urządzeń — naciśnij B aby skanować'
+            self._text(W // 2 - 140, H // 2 - 10, txt[:50], self.fmd, DIM)
+        else:
+            if self.bt_cursor < self.bt_scroll:
+                self.bt_scroll = self.bt_cursor
+            elif self.bt_cursor >= self.bt_scroll + max_visible:
+                self.bt_scroll = self.bt_cursor - max_visible + 1
+            for i in range(self.bt_scroll, min(len(self.bt_devices), self.bt_scroll + max_visible)):
+                dev = self.bt_devices[i]
+                y = list_top + (i - self.bt_scroll) * line_h
+                if i == self.bt_cursor:
+                    d.rectangle([(0, y - 2), (W, y + line_h - 4)], fill=SEL)
+                col = ACC if dev['connected'] else (GRN if dev['paired'] else FG)
+                marker = '✓' if dev['connected'] else ('★' if dev['paired'] else ' ')
+                self._text(8, y, marker, self.fmd, col)
+                self._text(28, y, dev['name'][:30], self.fmd, col)
+                self._text(W - 160, y, dev['mac'], self.fsm, DIM)
+
+        d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
+        if self.message:
+            mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
+            self._text(8, H - 44, self.message, self.fsm, mc)
+        legend = 'A=połącz/paruj  B=skanuj  X=usuń  L1/R1=WiFi  MENU=wyjście'
+        self._text(8, H - 16, legend, self.fsm, DIM)
+
+    def bt_refresh(self, scan: bool = False):
+        if scan:
+            self.message = 'Skanuję urządzenia BT (8 s)...'
+            self.render()
+            bt_adapter_on()
+            bt_scan(8)
+        elif not self.bt_loaded:
+            self.message = 'Włączam Bluetooth...'
+            self.render()
+            bt_adapter_on()
+        self.bt_devices = bt_devices_list()
+        self.bt_loaded = True
+        if self.bt_cursor >= len(self.bt_devices):
+            self.bt_cursor = max(0, len(self.bt_devices) - 1)
+        self.message = (f'Urządzeń: {len(self.bt_devices)}' if self.bt_devices
+                        else 'Brak urządzeń — B = skanuj')
+
+    def bt_action(self):
+        """A na urządzeniu: connect/disconnect dla sparowanych, pair dla nowych."""
+        if not self.bt_devices or self.bt_pair is not None:
+            return
+        dev = self.bt_devices[self.bt_cursor]
+        if dev['connected']:
+            self.message = f'Rozłączam {dev["name"][:24]}...'
+            self.render()
+            ok, msg = bt_disconnect(dev['mac'])
+            self.message = msg
+            self.bt_refresh()
+        elif dev['paired']:
+            self.message = f'Łączę z {dev["name"][:24]}...'
+            self.render()
+            ok, msg = bt_connect(dev['mac'])
+            self.message = msg
+            self.bt_refresh()
+        else:
+            log(f'bt pair start: {dev["mac"]}')
+            self.bt_pair = BtPairJob(dev['mac'])
+            self.bt_pair.start()
+            self.message = f'Paruję {dev["name"][:24]}...'
+
+    def bt_forget(self):
+        if not self.bt_devices:
+            return
+        dev = self.bt_devices[self.bt_cursor]
+        if not dev['paired']:
+            self.message = 'Urządzenie nie jest sparowane'
+            return
+        self.message = ('Usunięto ' + dev['name'][:24]) if bt_remove(dev['mac']) \
+            else 'Błąd usuwania'
+        self.bt_refresh()
+
+    def _handle_bt_event(self, e):
+        if e.type == 1 and e.value == 1:  # EV_KEY press
+            if e.code in EXIT_KEYS:
+                self.mode = '__quit__'
+            elif self.bt_pair is not None and not self.bt_pair.done:
+                return  # w trakcie parowania ignoruj akcje
+            elif e.code == KEY_A:
+                self.bt_action(); self.render()
+            elif e.code == KEY_B:
+                self.bt_refresh(scan=True); self.render()
+            elif e.code == KEY_X:
+                self.bt_forget(); self.render()
+            elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+                self.tab = 'wifi'
+                self.message = ''
+                self.render()
+        elif e.type == 3 and e.code == ABS_HAT0Y and self.bt_devices:
+            if e.value == -1:
+                self.bt_cursor = (self.bt_cursor - 1) % len(self.bt_devices)
+                self.render()
+            elif e.value == 1:
+                self.bt_cursor = (self.bt_cursor + 1) % len(self.bt_devices)
+                self.render()
 
     def do_scan(self):
         self.message = 'Skanuję sieci...'
@@ -318,7 +559,7 @@ class WifiApp:
             self.message = f'Łączę z {net["ssid"]} (otwarta)...'
             self.render()
             rc, _, err = nmcli('device', 'wifi', 'connect', net['ssid'], 'ifname', 'wlan0', timeout=20)
-            self.message = f'Połączono' if rc == 0 else f'Błąd: {err[:50]}'
+            self.message = 'Połączono' if rc == 0 else f'Błąd: {err[:50]}'
             self.do_scan()
         else:
             # wymaga hasła — wejdź w tryb password
@@ -356,7 +597,7 @@ class WifiApp:
         kb_y0 = 180
         d.rectangle([(0, kb_y0), (W, H)], fill=(8, 10, 18, 255))
         # nagłówek password
-        self._text(8, 40, f'Połącz z:', self.fmd, DIM)
+        self._text(8, 40, 'Połącz z:', self.fmd, DIM)
         self._text(110, 40, self.pw_target_ssid[:40], self.fmd, ACC)
         self._text(8, 70, 'Hasło:', self.fmd, DIM)
         # pole hasła z kursorem
@@ -448,11 +689,27 @@ class WifiApp:
                     for e in self._gp.read():
                         if guard: continue
                         if self.mode == 'list':
-                            self._handle_list_event(e)
+                            if self.tab == 'bt':
+                                self._handle_bt_event(e)
+                            else:
+                                self._handle_list_event(e)
                         else:
                             self._handle_password_event(e)
                         if self.mode == '__quit__':
                             self.quit(); return
+
+            # polling zadania parowania BT (działa w tle)
+            if self.bt_pair is not None:
+                if self.bt_pair.done:
+                    self.message = self.bt_pair.msg
+                    self.bt_pair = None
+                    self.bt_refresh()
+                    self.render()
+                elif self.bt_pair.passkey and not getattr(self, '_pk_shown', ''):
+                    self._pk_shown = self.bt_pair.passkey
+                    self.render()
+            elif getattr(self, '_pk_shown', ''):
+                self._pk_shown = ''
 
             # SDL events — BT klawiatura
             while sdl2.SDL_PollEvent(ctypes.byref(ev)):
@@ -497,6 +754,13 @@ class WifiApp:
                 self.do_scan(); self.render()
             elif e.code == KEY_X:
                 self.do_forget(); self.render()
+            elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+                self.tab = 'bt'
+                self.message = ''
+                if not self.bt_loaded:
+                    self.render()
+                    self.bt_refresh()
+                self.render()
         elif e.type == 3 and e.code == ABS_HAT0Y:  # D-pad Y
             if e.value == -1 and self.networks:
                 self.cursor = (self.cursor - 1) % len(self.networks)
