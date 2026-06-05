@@ -234,6 +234,40 @@ def bt_remove(mac: str) -> bool:
     rc, _, _ = btctl('remove', mac, timeout=10)
     return rc == 0
 
+class BtOp(threading.Thread):
+    """Operacja BT w tle — UI NIGDY nie blokuje (bluetoothctl potrafi mielić
+    po kilka-kilkanaście sekund; wywołania w wątku UI zawieszały apkę)."""
+    def __init__(self, kind: str, mac: str = ''):
+        super().__init__(daemon=True)
+        self.kind = kind
+        self.mac = mac
+        self.done = False
+        self.msg = ''
+        self.devices = None
+
+    def run(self):
+        try:
+            if self.kind == 'refresh':
+                bt_adapter_on()
+            elif self.kind == 'scan':
+                bt_adapter_on()
+                bt_scan(8)
+            elif self.kind == 'connect':
+                _, self.msg = bt_connect(self.mac)
+            elif self.kind == 'disconnect':
+                _, self.msg = bt_disconnect(self.mac)
+            elif self.kind == 'remove':
+                self.msg = 'usunięto' if bt_remove(self.mac) else 'błąd usuwania'
+            self.devices = bt_devices_list()
+            if not self.msg:
+                self.msg = (f'Urządzeń: {len(self.devices)}' if self.devices
+                            else 'Brak urządzeń — B = skanuj')
+        except Exception as e:
+            self.msg = f'błąd BT: {e}'
+            log(f'BtOp {self.kind} EXC: {e}')
+        self.done = True
+
+
 class BtPairJob(threading.Thread):
     """Parowanie w tle: bluetoothctl z agentem KeyboardDisplay. Dla klawiatur
     BT bluez wyświetla PIN, który trzeba wpisać NA urządzeniu (i Enter) —
@@ -320,6 +354,9 @@ class WifiApp:
         self.bt_scroll  = 0
         self.bt_loaded  = False
         self.bt_pair: BtPairJob | None = None
+        self.bt_op: BtOp | None = None      # operacja w tle (refresh/scan/...)
+        self._tab_ts = 0.0                  # debounce przełączania zakładek
+                                            # (R1 emituje DWA kody: 308 i 311)
         # password mode
         self.pw_target_ssid = ''
         self.pw_text        = ''
@@ -453,40 +490,32 @@ class WifiApp:
         legend = 'A=połącz/paruj  B=skanuj  X=usuń  L1/R1=WiFi  MENU=wyjście'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
+    def _bt_start(self, kind: str, mac: str = '', msg: str = ''):
+        """Start operacji BT w tle (jedna naraz). UI dalej żyje."""
+        if self.bt_op is not None and not self.bt_op.done:
+            return
+        self.bt_op = BtOp(kind, mac)
+        self.bt_op.start()
+        self.message = msg or 'Pracuję...'
+
     def bt_refresh(self, scan: bool = False):
-        if scan:
-            self.message = 'Skanuję urządzenia BT (8 s)...'
-            self.render()
-            bt_adapter_on()
-            bt_scan(8)
-        elif not self.bt_loaded:
-            self.message = 'Włączam Bluetooth...'
-            self.render()
-            bt_adapter_on()
-        self.bt_devices = bt_devices_list()
         self.bt_loaded = True
-        if self.bt_cursor >= len(self.bt_devices):
-            self.bt_cursor = max(0, len(self.bt_devices) - 1)
-        self.message = (f'Urządzeń: {len(self.bt_devices)}' if self.bt_devices
-                        else 'Brak urządzeń — B = skanuj')
+        if scan:
+            self._bt_start('scan', msg='Skanuję urządzenia BT (~10 s)...')
+        else:
+            self._bt_start('refresh', msg='Odświeżam listę BT...')
 
     def bt_action(self):
         """A na urządzeniu: connect/disconnect dla sparowanych, pair dla nowych."""
         if not self.bt_devices or self.bt_pair is not None:
             return
+        if self.bt_op is not None and not self.bt_op.done:
+            return
         dev = self.bt_devices[self.bt_cursor]
         if dev['connected']:
-            self.message = f'Rozłączam {dev["name"][:24]}...'
-            self.render()
-            ok, msg = bt_disconnect(dev['mac'])
-            self.message = msg
-            self.bt_refresh()
+            self._bt_start('disconnect', dev['mac'], f'Rozłączam {dev["name"][:24]}...')
         elif dev['paired']:
-            self.message = f'Łączę z {dev["name"][:24]}...'
-            self.render()
-            ok, msg = bt_connect(dev['mac'])
-            self.message = msg
-            self.bt_refresh()
+            self._bt_start('connect', dev['mac'], f'Łączę z {dev["name"][:24]}...')
         else:
             log(f'bt pair start: {dev["mac"]}')
             self.bt_pair = BtPairJob(dev['mac'])
@@ -500,9 +529,7 @@ class WifiApp:
         if not dev['paired']:
             self.message = 'Urządzenie nie jest sparowane'
             return
-        self.message = ('Usunięto ' + dev['name'][:24]) if bt_remove(dev['mac']) \
-            else 'Błąd usuwania'
-        self.bt_refresh()
+        self._bt_start('remove', dev['mac'], f'Usuwam {dev["name"][:24]}...')
 
     def _handle_bt_event(self, e):
         if e.type == 1 and e.value == 1:  # EV_KEY press
@@ -517,6 +544,9 @@ class WifiApp:
             elif e.code == KEY_X:
                 self.bt_forget(); self.render()
             elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+                if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
+                    return
+                self._tab_ts = time.time()
                 self.tab = 'wifi'
                 self.message = ''
                 self.render()
@@ -698,6 +728,17 @@ class WifiApp:
                         if self.mode == '__quit__':
                             self.quit(); return
 
+            # polling operacji BT w tle (refresh/scan/connect/...)
+            if self.bt_op is not None and self.bt_op.done:
+                if self.bt_op.devices is not None:
+                    self.bt_devices = self.bt_op.devices
+                    if self.bt_cursor >= len(self.bt_devices):
+                        self.bt_cursor = max(0, len(self.bt_devices) - 1)
+                self.message = self.bt_op.msg
+                self.bt_op = None
+                if self.tab == 'bt':
+                    self.render()
+
             # polling zadania parowania BT (działa w tle)
             if self.bt_pair is not None:
                 if self.bt_pair.done:
@@ -755,11 +796,13 @@ class WifiApp:
             elif e.code == KEY_X:
                 self.do_forget(); self.render()
             elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+                if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
+                    return
+                self._tab_ts = time.time()
                 self.tab = 'bt'
                 self.message = ''
                 if not self.bt_loaded:
-                    self.render()
-                    self.bt_refresh()
+                    self.bt_refresh()     # nieblokujące — w tle
                 self.render()
         elif e.type == 3 and e.code == ABS_HAT0Y:  # D-pad Y
             if e.value == -1 and self.networks:
