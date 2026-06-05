@@ -228,7 +228,8 @@ def bt_scan(seconds: int = 8) -> dict:
     return _parse_devices(out) if rc == 0 else {}
 
 def bt_devices_list() -> list:
-    """Lista dict: mac, name, paired, connected — sparowane najpierw."""
+    """Lista dict: mac, name, paired, connected, named — sparowane najpierw,
+    bezimienne (BlueZ podstawia MAC jako nazwę) na końcu."""
     paired = bt_paired()
     rc, out, _ = btctl('devices')
     known = _parse_devices(out) if rc == 0 else {}
@@ -236,9 +237,11 @@ def bt_devices_list() -> list:
     devs = []
     for mac, name in known.items():
         is_p = mac in paired
-        devs.append({'mac': mac, 'name': name, 'paired': is_p,
+        named = name.replace('-', ':').upper() != mac.upper()
+        devs.append({'mac': mac, 'name': name, 'paired': is_p, 'named': named,
                      'connected': bt_is_connected(mac) if is_p else False})
-    devs.sort(key=lambda d: (-d['connected'], -d['paired'], d['name'].lower()))
+    devs.sort(key=lambda d: (-d['connected'], -d['paired'], -d['named'],
+                             d['name'].lower()))
     return devs
 
 def bt_connect(mac: str) -> tuple:
@@ -497,10 +500,13 @@ class WifiApp:
                 y = list_top + (i - self.bt_scroll) * line_h
                 if i == self.bt_cursor:
                     d.rectangle([(0, y - 2), (W, y + line_h - 4)], fill=SEL)
-                col = ACC if dev['connected'] else (GRN if dev['paired'] else FG)
+                named = dev.get('named', True)
+                col = ACC if dev['connected'] else (GRN if dev['paired']
+                                                    else (FG if named else DIM))
                 marker = '✓' if dev['connected'] else ('★' if dev['paired'] else ' ')
+                disp = dev['name'][:30] if named else '(bez nazwy)'
                 self._text(8, y, marker, self.fmd, col)
-                self._text(28, y, dev['name'][:30], self.fmd, col)
+                self._text(28, y, disp, self.fmd, col)
                 self._text(W - 160, y, dev['mac'], self.fsm, DIM)
 
         d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
