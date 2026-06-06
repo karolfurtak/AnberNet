@@ -310,6 +310,28 @@ def bt_is_trusted(mac: str) -> bool:
     return 'Trusted: yes' in out
 
 
+def bt_battery(mac: str):
+    """Poziom naładowania przez D-Bus **org.bluez.Battery1** (BlueZ w trybie
+    --experimental; agreguje raporty AVRCP/HFP/GATT Battery Service).
+    None = urządzenie rozłączone albo nie raportuje baterii."""
+    path = '/org/bluez/hci0/dev_' + mac.replace(':', '_')
+    for busctl in ('/usr/bin/busctl', '/bin/busctl', 'busctl'):
+        try:
+            r = subprocess.run(
+                [busctl, 'get-property', 'org.bluez', path,
+                 'org.bluez.Battery1', 'Percentage'],
+                capture_output=True, text=True, timeout=5)
+            out = r.stdout.strip()
+            if r.returncode == 0 and out.startswith('y '):
+                return int(out.split()[1])
+            return None
+        except FileNotFoundError:
+            continue
+        except Exception:
+            return None
+    return None
+
+
 def audio_default_mac():
     """MAC urządzenia ustawionego jako domyślne wyjście audio (albo None)."""
     try:
@@ -358,6 +380,7 @@ class BtOp(threading.Thread):
         self.msg = ''
         self.devices = None
         self.trusted = None
+        self.battery = None
 
     def run(self):
         try:
@@ -386,6 +409,7 @@ class BtOp(threading.Thread):
                 self.msg = 'zaufane: NIE'
             elif self.kind == 'detail':
                 self.trusted = bt_is_trusted(self.mac)
+                self.battery = bt_battery(self.mac)
                 self.msg = ''
             self.devices = bt_devices_list()
             if not self.msg:
@@ -613,6 +637,13 @@ class WifiApp:
         self._text(8, 42, dev['name'][:34], self.flg,
                    ACC if dev['connected'] else FG)
         self._text(8, 70, dev['mac'], self.fsm, DIM)
+        # poziom naładowania — BlueZ Battery1 (D-Bus, agregat AVRCP/HFP/GATT BAS)
+        bat = dev.get('battery')
+        if bat is not None:
+            bcol = GRN if bat > 40 else (YEL if bat > 15 else RED)
+            self._text(220, 70, f'■ Battery1: {bat}%', self.fsm, bcol)
+        elif dev['connected']:
+            self._text(220, 70, '□ Battery1: nie raportuje', self.fsm, DIM)
         d.line([(0, 90), (W, 90)], fill=SEP, width=1)
 
         trusted = dev.get('trusted')
@@ -1024,6 +1055,11 @@ class WifiApp:
                 if time.time() - getattr(self, '_dt_ts', 0) > 2:
                     self._dt_ts = time.time()
                     self.render()
+                # co 10 s świeże dane urządzenia (trust, Battery1, connected)
+                if (time.time() - getattr(self, '_dt_full_ts', 0) > 10
+                        and (self.bt_op is None or self.bt_op.done)):
+                    self._dt_full_ts = time.time()
+                    self._bt_start('detail', self.bt_detail['mac'], '')
 
             # polling operacji BT w tle (refresh/scan/connect/...)
             if self.bt_op is not None and self.bt_op.done:
@@ -1035,6 +1071,7 @@ class WifiApp:
                 if (self.bt_op.kind == 'detail' and self.bt_detail is not None
                         and self.bt_op.mac == self.bt_detail['mac']):
                     self.bt_detail['trusted'] = self.bt_op.trusted
+                    self.bt_detail['battery'] = self.bt_op.battery
                 # po połączeniu/rozłączeniu odśwież stan w widoku szczegółów
                 if self.bt_detail is not None and self.bt_op.devices is not None:
                     for d_ in self.bt_op.devices:
