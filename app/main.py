@@ -5,6 +5,7 @@ GitHub: https://github.com/karolfurtak/AnberNet
 """
 import os, subprocess, ctypes, time, threading, re
 from datetime import datetime
+from pathlib import Path
 
 os.environ.pop('SDL_VIDEODRIVER', None)
 
@@ -257,6 +258,67 @@ def bt_remove(mac: str) -> bool:
     rc, _, _ = btctl('remove', mac, timeout=10)
     return rc == 0
 
+ASOUND_CONF = '/etc/asound.conf'
+_AUD_S = '# >>> ANBERNET-BT-DEFAULT'
+_AUD_E = '# <<< ANBERNET-BT-DEFAULT <<<'
+
+
+def wifi_radio_on() -> bool:
+    _, out, _ = nmcli('radio', 'wifi', timeout=6)
+    return 'enabled' in out
+
+
+def wifi_radio_set(on: bool):
+    nmcli('radio', 'wifi', 'on' if on else 'off', timeout=8)
+
+
+def bt_power_state() -> bool:
+    _, out, _ = btctl('show', timeout=6)
+    return 'Powered: yes' in out
+
+
+def bt_is_trusted(mac: str) -> bool:
+    _, out, _ = btctl('info', mac, timeout=8)
+    return 'Trusted: yes' in out
+
+
+def audio_default_mac():
+    """MAC urządzenia ustawionego jako domyślne wyjście audio (albo None)."""
+    try:
+        txt = Path(ASOUND_CONF).read_text()
+    except Exception:
+        return None
+    m = re.search(re.escape(_AUD_S) + r'.*?device "([0-9A-Fa-f:]+)"', txt, re.S)
+    return m.group(1).upper() if m else None
+
+
+def audio_default_set(mac):
+    """mac -> przekieruj CAŁE domyślne audio na to urządzenie BT;
+    None -> usuń blok = powrót na głośniki wbudowane (fabryczny config
+    pozostaje nietknięty — operujemy wyłącznie na oznaczonym bloku)."""
+    try:
+        txt = Path(ASOUND_CONF).read_text()
+    except Exception:
+        txt = ''
+    nl = chr(10)
+    txt = re.sub(re.escape(_AUD_S) + r'.*?' + re.escape(_AUD_E),
+                 '', txt, flags=re.S).rstrip(nl) + nl
+    if mac:
+        blok = nl.join([
+            '', _AUD_S + ' (toggle z AnberNet) >>>',
+            'pcm.!default {',
+            '    type plug',
+            '    slave.pcm {',
+            '        type bluealsa',
+            f'        device "{mac}"',
+            '        profile "a2dp"',
+            '    }',
+            '}',
+            _AUD_E, ''])
+        txt += blok
+    Path(ASOUND_CONF).write_text(txt)
+
+
 class BtOp(threading.Thread):
     """Operacja BT w tle — UI NIGDY nie blokuje (bluetoothctl potrafi mielić
     po kilka-kilkanaście sekund; wywołania w wątku UI zawieszały apkę)."""
@@ -267,6 +329,7 @@ class BtOp(threading.Thread):
         self.done = False
         self.msg = ''
         self.devices = None
+        self.trusted = None
 
     def run(self):
         try:
@@ -281,6 +344,21 @@ class BtOp(threading.Thread):
                 _, self.msg = bt_disconnect(self.mac)
             elif self.kind == 'remove':
                 self.msg = 'usunięto' if bt_remove(self.mac) else 'błąd usuwania'
+            elif self.kind == 'power_on':
+                bt_adapter_on()
+                self.msg = 'Bluetooth włączony'
+            elif self.kind == 'power_off':
+                btctl('power', 'off', timeout=8)
+                self.msg = 'Bluetooth wyłączony'
+            elif self.kind == 'trust_on':
+                btctl('trust', self.mac, timeout=8)
+                self.msg = 'zaufane: TAK'
+            elif self.kind == 'trust_off':
+                btctl('untrust', self.mac, timeout=8)
+                self.msg = 'zaufane: NIE'
+            elif self.kind == 'detail':
+                self.trusted = bt_is_trusted(self.mac)
+                self.msg = ''
             self.devices = bt_devices_list()
             if not self.msg:
                 self.msg = (f'Urządzeń: {len(self.devices)}' if self.devices
@@ -404,6 +482,10 @@ class WifiApp:
         self.bt_op: BtOp | None = None      # operacja w tle (refresh/scan/...)
         self._tab_ts = 0.0                  # debounce przełączania zakładek
                                             # (R1 emituje DWA kody: 308 i 311)
+        self.bt_detail = None               # urządzenie w widoku uprawnień
+        self.bt_dcur = 0                    # kursor w widoku uprawnień
+        self._wifi_on = None                # cache stanu radia WiFi
+        self._bt_on = None                  # cache stanu adaptera BT
         # password mode
         self.pw_target_ssid = ''
         self.pw_text        = ''
@@ -418,12 +500,16 @@ class WifiApp:
         d = self.draw
         d.rectangle([(0, 0), (W, H)], fill=BG)
 
-        # nagłówek + zakładki
+        # nagłówek + zakładki (ze wskaźnikiem zasilania radia: ● on / ○ off)
         self._text(8, 6, '⬡ AnberNet', self.flg, ACC)
         wifi_col = ACC if self.tab == 'wifi' else DIM
         bt_col   = ACC if self.tab == 'bt' else DIM
-        self._text(170, 10, '[WiFi]', self.fmd, wifi_col)
-        self._text(232, 10, '[Bluetooth]', self.fmd, bt_col)
+        w_dot = '' if self._wifi_on is None else ('●' if self._wifi_on else '○')
+        b_dot = '' if self._bt_on is None else ('●' if self._bt_on else '○')
+        self._text(170, 10, f'[WiFi{w_dot}]', self.fmd,
+                   wifi_col if self._wifi_on in (None, True) else RED)
+        self._text(245, 10, f'[Bluetooth{b_dot}]', self.fmd,
+                   bt_col if self._bt_on in (None, True) else RED)
         ip = current_ip()
         ip_str = f'IP: {ip}' if ip else 'IP: brak'
         tw = self.fmd.getlength(ip_str)
@@ -474,7 +560,7 @@ class WifiApp:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
         # legenda
-        legend = 'A=połącz/rozłącz  B=skanuj  X=zapomnij  L1/R1=Bluetooth  MENU=wyjście'
+        legend = 'A=połącz B=skanuj X=zapomnij START=WiFi on/off L1/R1=BT MENU=wyjście'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
         self._blit()
@@ -492,8 +578,49 @@ class WifiApp:
         sdl2.SDL_RenderPresent(self.ren)
 
     # ── Bluetooth: render + akcje ───────────────────────────────────────────
+    def _render_bt_detail(self):
+        """Widok uprawnień urządzenia (SELECT na liście): toggles + akcje."""
+        d = self.draw
+        dev = self.bt_detail
+        self._text(8, 42, dev['name'][:34], self.flg,
+                   ACC if dev['connected'] else FG)
+        self._text(8, 70, dev['mac'], self.fsm, DIM)
+        d.line([(0, 90), (W, 90)], fill=SEP, width=1)
+
+        trusted = dev.get('trusted')
+        tr_txt = '…' if trusted is None else ('TAK' if trusted else 'NIE')
+        audio_on = audio_default_mac() == dev['mac'].upper()
+        rows = [
+            f'(•) Zaufane / auto-łączenie: {tr_txt}'
+            if trusted else f'( ) Zaufane / auto-łączenie: {tr_txt}',
+            f'(•) Dźwięk multimediów → to urządzenie'
+            if audio_on else '( ) Dźwięk multimediów → to urządzenie',
+            'Rozłącz' if dev['connected'] else 'Połącz',
+            'Usuń sparowanie',
+        ]
+        for i, label in enumerate(rows):
+            y = 104 + i * 34
+            if i == self.bt_dcur:
+                d.rectangle([(0, y - 4), (W, y + 26)], fill=SEL)
+            col = GRN if (i == 0 and trusted) or (i == 1 and audio_on) else FG
+            if i == 3:
+                col = RED if i == self.bt_dcur else DIM
+            self._text(24, y, label, self.fmd, col)
+
+        if audio_on:
+            self._text(24, 104 + 4 * 34, 'Uwaga: gdy głośnik się rozłączy,', self.fsm, DIM)
+            self._text(24, 104 + 4 * 34 + 16, 'dźwięk systemowy zamilknie do wyłączenia tej opcji.', self.fsm, DIM)
+
+        d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
+        if self.message:
+            self._text(8, H - 44, self.message, self.fsm, FG)
+        self._text(8, H - 16, 'D-pad=wybór  A=przełącz/wykonaj  B=powrót', self.fsm, DIM)
+
     def _render_bt(self):
         d = self.draw
+        if self.bt_detail is not None:
+            self._render_bt_detail()
+            return
         list_top = 38
         line_h   = 26
         max_visible = (H - list_top - 60) // line_h
@@ -540,7 +667,7 @@ class WifiApp:
         if self.message:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
-        legend = 'A=połącz/paruj  B=skanuj  X=usuń  L1/R1=WiFi  MENU=wyjście'
+        legend = 'A=połącz/paruj B=skan X=usuń SELECT=opcje START=BT on/off L1/R1=WiFi'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
     def _bt_start(self, kind: str, mac: str = '', msg: str = ''):
@@ -584,7 +711,56 @@ class WifiApp:
             return
         self._bt_start('remove', dev['mac'], f'Usuwam {dev["name"][:24]}...')
 
+    def _handle_bt_detail_event(self, e):
+        dev = self.bt_detail
+        if e.type == 1 and e.value == 1:
+            if e.code in EXIT_KEYS:
+                self.mode = '__quit__'
+            elif e.code == KEY_B:
+                self.bt_detail = None
+                self.message = ''
+                self.render()
+            elif e.code == KEY_A:
+                if self.bt_op is not None and not self.bt_op.done:
+                    return
+                if self.bt_dcur == 0:      # zaufane
+                    cur = dev.get('trusted')
+                    if cur is None:
+                        return
+                    dev['trusted'] = not cur
+                    self._bt_start('trust_off' if cur else 'trust_on',
+                                   dev['mac'], 'Zmieniam zaufanie...')
+                elif self.bt_dcur == 1:    # dźwięk multimediów (toggle natychmiastowy)
+                    try:
+                        if audio_default_mac() == dev['mac'].upper():
+                            audio_default_set(None)
+                            self.message = 'Dźwięk: głośniki wbudowane'
+                        else:
+                            audio_default_set(dev['mac'])
+                            self.message = 'Dźwięk multimediów → ' + dev['name'][:22]
+                    except Exception as ex:
+                        self.message = f'błąd: {ex}'
+                elif self.bt_dcur == 2:    # połącz/rozłącz
+                    self._bt_start('disconnect' if dev['connected'] else 'connect',
+                                   dev['mac'],
+                                   ('Rozłączam...' if dev['connected'] else 'Łączę...'))
+                    dev['connected'] = not dev['connected']   # optymistycznie
+                elif self.bt_dcur == 3:    # usuń
+                    self._bt_start('remove', dev['mac'], 'Usuwam sparowanie...')
+                    self.bt_detail = None
+                self.render()
+        elif e.type == 3 and e.code == ABS_HAT0Y:
+            if e.value == -1:
+                self.bt_dcur = (self.bt_dcur - 1) % 4
+                self.render()
+            elif e.value == 1:
+                self.bt_dcur = (self.bt_dcur + 1) % 4
+                self.render()
+
     def _handle_bt_event(self, e):
+        if self.bt_detail is not None:
+            self._handle_bt_detail_event(e)
+            return
         if e.type == 1 and e.value == 1:  # EV_KEY press
             if e.code in EXIT_KEYS:
                 self.mode = '__quit__'
@@ -596,6 +772,23 @@ class WifiApp:
                 self.bt_refresh(scan=True); self.render()
             elif e.code == KEY_X:
                 self.bt_forget(); self.render()
+            elif e.code == KEY_SELECT:
+                if self.bt_devices:
+                    self.bt_detail = dict(self.bt_devices[self.bt_cursor])
+                    self.bt_detail['trusted'] = None
+                    self.bt_dcur = 0
+                    self.message = ''
+                    self._bt_start('detail', self.bt_detail['mac'], 'Czytam opcje...')
+                    self.render()
+            elif e.code == KEY_START:
+                # toggle zasilania Bluetooth
+                if self.bt_op is None or self.bt_op.done:
+                    on = bool(self._bt_on)
+                    self._bt_on = not on
+                    self._bt_start('power_off' if on else 'power_on',
+                                   msg=('Wyłączam Bluetooth...' if on
+                                        else 'Włączam Bluetooth...'))
+                    self.render()
             elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
                 if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
                     return
@@ -744,7 +937,9 @@ class WifiApp:
         except Exception:
             self._screen_pwr = None
 
-        # początkowy skan
+        # stan radii do nagłówka (dwa szybkie odczyty) + początkowy skan
+        self._wifi_on = wifi_radio_on()
+        self._bt_on = bt_power_state()
         self.render()
         self.do_scan()
         self.render()
@@ -787,7 +982,18 @@ class WifiApp:
                     self.bt_devices = self.bt_op.devices
                     if self.bt_cursor >= len(self.bt_devices):
                         self.bt_cursor = max(0, len(self.bt_devices) - 1)
-                self.message = self.bt_op.msg
+                # wynik odczytu opcji urządzenia (widok uprawnień)
+                if (self.bt_op.kind == 'detail' and self.bt_detail is not None
+                        and self.bt_op.mac == self.bt_detail['mac']):
+                    self.bt_detail['trusted'] = self.bt_op.trusted
+                # po połączeniu/rozłączeniu odśwież stan w widoku szczegółów
+                if self.bt_detail is not None and self.bt_op.devices is not None:
+                    for d_ in self.bt_op.devices:
+                        if d_['mac'] == self.bt_detail['mac']:
+                            self.bt_detail['connected'] = d_['connected']
+                            self.bt_detail['paired'] = d_['paired']
+                if self.bt_op.msg:
+                    self.message = self.bt_op.msg
                 self.bt_op = None
                 if self.tab == 'bt':
                     self.render()
@@ -848,6 +1054,19 @@ class WifiApp:
                 self.do_scan(); self.render()
             elif e.code == KEY_X:
                 self.do_forget(); self.render()
+            elif e.code == KEY_START:
+                # toggle zasilania WiFi (nmcli radio — szybkie, inline)
+                on = bool(self._wifi_on)
+                self.message = 'Wyłączam WiFi...' if on else 'Włączam WiFi...'
+                self.render()
+                wifi_radio_set(not on)
+                self._wifi_on = not on
+                self.message = 'WiFi wyłączone' if on else 'WiFi włączone'
+                if not on:
+                    self.do_scan()
+                else:
+                    self.networks = []
+                self.render()
             elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
                 if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
                     return
