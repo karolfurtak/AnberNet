@@ -741,6 +741,10 @@ class WifiApp:
                         if audio_default_mac() == dev['mac'].upper():
                             audio_default_set(None)
                             self.message = 'Dźwięk: głośniki wbudowane'
+                        elif not dev['connected']:
+                            # bez połączenia przekierowanie = cisza systemowa
+                            # (bt-audio-guard i tak by je zdjął po ~20 s)
+                            self.message = 'Najpierw POŁĄCZ urządzenie (pozycja niżej)'
                         else:
                             audio_default_set(dev['mac'])
                             self.message = 'Dźwięk multimediów → ' + dev['name'][:22]
@@ -981,6 +985,14 @@ class WifiApp:
                             self._handle_password_event(e)
                         if self.mode == '__quit__':
                             self.quit(); return
+
+            # widok uprawnień: odświeżaj co 2 s — stan „Dźwięk multimediów"
+            # zmienia w tle bt-audio-guard (zdejmuje przekierowanie po
+            # rozłączeniu głośnika) i ekran ma za nim nadążać
+            if self.tab == 'bt' and self.bt_detail is not None:
+                if time.time() - getattr(self, '_dt_ts', 0) > 2:
+                    self._dt_ts = time.time()
+                    self.render()
 
             # polling operacji BT w tle (refresh/scan/connect/...)
             if self.bt_op is not None and self.bt_op.done:
