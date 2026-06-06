@@ -27,16 +27,22 @@ DIM = (90, 100, 110, 255)
 SEP = (40, 50, 65, 255)
 SEL = (40, 80, 130, 255)   # tło zaznaczenia
 
-# ── Input codes (evdev) ─────────────────────────────────────────────────────
-EXIT_KEYS  = {354, 316}   # MENU
-KEY_A      = 304          # zatwierdź
-KEY_B      = 305          # cofnij / backspace
-KEY_X      = 307          # zapomnij / shift
-KEY_Y      = 308          # spacja
-KEY_START  = 315          # OK / submit
-KEY_SELECT = 314          # zmień layout (abc/ABC/123)
-KEY_L1     = 310          # cursor w lewo (alt do D-pad)
-KEY_R1     = 311          # cursor w prawo
+# ── Input codes (evdev) — REALNA mapa RG40XX V (empirycznie, 2026-06-06) ────
+# Fizyczne przyciski emitują INNE kody niż sugerują nazwy z nagłówków kernela:
+#   A=304  B=305  Y=306(BTN_C!)  X=307
+#   L2=314  R2=315          <- to NIE są SELECT/START!
+#   SELECT/START/L1/R1 emitują kody z puli {308,310,311,312,313}
+#   (R1 potrafi nadać 308 ORAZ 311; dokładny rozdział wymaga pomiaru evtest)
+#   MENU=354/316, D-pad = EV_ABS 16/17
+EXIT_KEYS  = {354, 316}   # MENU = wyjście
+KEY_A      = 304          # A = zatwierdź / połącz / paruj
+KEY_B      = 305          # B = skanuj / cofnij / backspace
+KEY_X      = 307          # X = zapomnij-usuń / shift
+KEY_OPTS   = 314          # fizycznie L2 = opcje urządzenia (BT) / layout (hasło)
+KEY_POWER  = 315          # fizycznie R2 = zasilanie radia / submit hasła
+TAB_KEYS   = {308, 310, 311, 312, 313}  # SELECT/START/L1/R1 = zmiana zakładki
+KEY_KBLEFT  = 310         # kursor klawiatury ekranowej w lewo
+KEY_KBRIGHT = 311         # kursor klawiatury ekranowej w prawo
 ABS_HAT0X  = 16           # D-pad left/right
 ABS_HAT0Y  = 17           # D-pad up/down
 
@@ -560,7 +566,7 @@ class WifiApp:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
         # legenda
-        legend = 'A=połącz B=skanuj X=zapomnij START=WiFi on/off L1/R1=BT MENU=wyjście'
+        legend = 'A=połącz B=skanuj X=zapomnij R2=WiFi on/off SELECT/START=zakładka MENU=wyjście'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
         self._blit()
@@ -667,7 +673,7 @@ class WifiApp:
         if self.message:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
-        legend = 'A=połącz/paruj B=skan X=usuń SELECT=opcje START=BT on/off L1/R1=WiFi'
+        legend = 'A=połącz/paruj B=skan X=usuń L2=opcje R2=BT on/off SELECT/START=zakładka'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
     def _bt_start(self, kind: str, mac: str = '', msg: str = ''):
@@ -772,7 +778,7 @@ class WifiApp:
                 self.bt_refresh(scan=True); self.render()
             elif e.code == KEY_X:
                 self.bt_forget(); self.render()
-            elif e.code == KEY_SELECT:
+            elif e.code == KEY_OPTS:    # fizycznie L2
                 if self.bt_devices:
                     self.bt_detail = dict(self.bt_devices[self.bt_cursor])
                     self.bt_detail['trusted'] = None
@@ -780,7 +786,7 @@ class WifiApp:
                     self.message = ''
                     self._bt_start('detail', self.bt_detail['mac'], 'Czytam opcje...')
                     self.render()
-            elif e.code == KEY_START:
+            elif e.code == KEY_POWER:   # fizycznie R2
                 # toggle zasilania Bluetooth
                 if self.bt_op is None or self.bt_op.done:
                     on = bool(self._bt_on)
@@ -789,7 +795,7 @@ class WifiApp:
                                    msg=('Wyłączam Bluetooth...' if on
                                         else 'Włączam Bluetooth...'))
                     self.render()
-            elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+            elif e.code in TAB_KEYS:                 # SELECT/START/L1/R1
                 if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
                     return
                 self._tab_ts = time.time()
@@ -845,7 +851,7 @@ class WifiApp:
             self.pw_kb_row = 1
             self.pw_kb_col = 0
             self.pw_layout_idx = 0
-            self.message = 'Wpisz hasło (BT KB lub ekran), Enter/START=połącz'
+            self.message = 'Wpisz hasło (BT KB lub ekran), Enter/R2=połącz'
             sdl2.SDL_StartTextInput()
 
     def do_password_submit(self):
@@ -1054,7 +1060,7 @@ class WifiApp:
                 self.do_scan(); self.render()
             elif e.code == KEY_X:
                 self.do_forget(); self.render()
-            elif e.code == KEY_START:
+            elif e.code == KEY_POWER:   # fizycznie R2
                 # toggle zasilania WiFi (nmcli radio — szybkie, inline)
                 on = bool(self._wifi_on)
                 self.message = 'Wyłączam WiFi...' if on else 'Włączam WiFi...'
@@ -1067,7 +1073,7 @@ class WifiApp:
                 else:
                     self.networks = []
                 self.render()
-            elif e.code in (KEY_L1, KEY_R1, KEY_Y):   # 308 = fizyczne R1 na tym sprzęcie
+            elif e.code in TAB_KEYS:                 # SELECT/START/L1/R1
                 if time.time() - self._tab_ts < 0.4:  # debounce (R1 = 2 kody!)
                     return
                 self._tab_ts = time.time()
@@ -1127,7 +1133,7 @@ class WifiApp:
             elif e.code == KEY_B:
                 self.pw_text = self.pw_text[:-1]
                 self.render()
-            elif e.code == KEY_Y:
+            elif e.code in (306, 308):   # spacja: fizyczne Y(306); 308 zostawione dla zgodności
                 if len(self.pw_text) < 63:
                     self.pw_text += ' '
                 self.render()
@@ -1136,11 +1142,17 @@ class WifiApp:
                 if self.pw_layout_idx == 0:    self.pw_layout_idx = 1
                 elif self.pw_layout_idx == 1:  self.pw_layout_idx = 0
                 self.render()
-            elif e.code == KEY_L1:
+            elif e.code == KEY_KBLEFT:
                 self.pw_kb_col = (self.pw_kb_col - 1) % len(layout[self.pw_kb_row])
                 self.render()
-            elif e.code == KEY_R1:
+            elif e.code == KEY_KBRIGHT:
                 self.pw_kb_col = (self.pw_kb_col + 1) % len(layout[self.pw_kb_row])
+                self.render()
+            elif e.code == KEY_POWER:   # fizycznie R2 = zatwierdź hasło
+                self.do_password_submit()
+                self.render()
+            elif e.code == KEY_OPTS:    # fizycznie L2 = zmiana layoutu abc/ABC/123
+                self.pw_layout_idx = (self.pw_layout_idx + 1) % len(KB_LAYOUTS)
                 self.render()
         elif e.type == 3:
             log(f'pw abs code={e.code} val={e.value}')
