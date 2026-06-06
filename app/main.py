@@ -304,27 +304,51 @@ class BtPairJob(threading.Thread):
         self.msg = 'paruję...'
 
     def run(self):
+        p = None
         try:
             p = subprocess.Popen(
                 [STDBUF, '-oL', BTCTL, '--timeout', '40',
                  '--agent', 'KeyboardDisplay', 'pair', self.mac],
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+            # KILLER: bluetoothctl potrafi utknąć na promptach agenta mimo
+            # --timeout (incydent: zombie wiszący godzinami = wieczne
+            # „Parowanie..."). Po 50 s proces ginie BEZWZGLĘDNIE.
+            killer = threading.Timer(50, p.kill)
+            killer.start()
             for line in p.stdout:
                 log(f'bt pair: {line.rstrip()}')
                 m = re.search(r'[Pp]asskey[^0-9]*(\d{4,6})', line)
                 if m:
                     self.passkey = m.group(1)
+                # prompty agenta (potwierdzenie passkey/autoryzacja usługi)
+                # — odpowiadamy automatycznie „yes", inaczej proces wisi
+                if '(yes/no)' in line or 'Confirm passkey' in line \
+                        or 'Authorize service' in line:
+                    try:
+                        p.stdin.write('yes\n')
+                        p.stdin.flush()
+                    except Exception:
+                        pass
                 if 'Pairing successful' in line:
                     self.ok = True
                 if 'Failed to pair' in line or 'AuthenticationFailed' in line \
                         or 'AuthenticationCanceled' in line:
                     self.msg = 'parowanie nieudane'
             p.wait(timeout=5)
+            killer.cancel()
         except Exception as e:
             self.msg = f'błąd: {e}'
+            try:
+                if p is not None:
+                    p.kill()
+            except Exception:
+                pass
         if self.ok:
             btctl('trust', self.mac, timeout=8)
             self.msg = 'sparowano + trust'
+        elif not self.msg or self.msg == 'paruję...':
+            self.msg = 'parowanie nieudane (timeout) — spróbuj ponownie'
         self.done = True
 
 # ── SDL App ─────────────────────────────────────────────────────────────────
@@ -474,17 +498,20 @@ class WifiApp:
         line_h   = 26
         max_visible = (H - list_top - 60) // line_h
 
-        # tryb parowania — duży PIN na środku
+        # tryb parowania — komunikaty CENTROWANE pomiarem szerokości tekstu
         if self.bt_pair is not None and not self.bt_pair.done:
-            self._text(W // 2 - 120, 120, 'PAROWANIE…', self.flg, YEL)
+            def _center(y, txt, font, col):
+                tw = font.getlength(txt)
+                self._text((W - int(tw)) // 2, y, txt, font, col)
+            _center(120, 'PAROWANIE…', self.flg, YEL)
             if self.bt_pair.passkey:
-                self._text(W // 2 - 150, 180, 'Wpisz na urządzeniu PIN:', self.fmd, FG)
-                self._text(W // 2 - 90, 220, self.bt_pair.passkey, self.flg, ACC)
-                self._text(W // 2 - 150, 270, 'i zatwierdź Enterem', self.fmd, DIM)
+                _center(180, 'Wpisz na urządzeniu PIN:', self.fmd, FG)
+                _center(220, self.bt_pair.passkey, self.flg, ACC)
+                _center(270, 'i zatwierdź Enterem', self.fmd, DIM)
             else:
-                self._text(W // 2 - 150, 180, 'Czekam na urządzenie…', self.fmd, DIM)
+                _center(180, 'Czekam na urządzenie…', self.fmd, DIM)
             d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
-            self._text(8, H - 16, 'Parowanie w toku — poczekaj do 40 s', self.fsm, DIM)
+            self._text(8, H - 16, 'Parowanie w toku — maks. 50 s', self.fsm, DIM)
             return
 
         if not self.bt_devices:
