@@ -267,6 +267,28 @@ def bt_remove(mac: str) -> bool:
 ASOUND_CONF = '/etc/asound.conf'
 _AUD_S = '# >>> ANBERNET-BT-DEFAULT'
 _AUD_E = '# <<< ANBERNET-BT-DEFAULT <<<'
+# TRWAŁA INTENCJA przekierowania audio (MOD-085): plik z MAC-iem urządzenia.
+# Toggle w aplikacji zapisuje/kasuje INTENCJĘ; live-routing (blok w asound.conf)
+# synchronizuje bt-audio-guard co 15 s wg stanu połączenia. Dzięki temu
+# ustawienie usera NIE znika, gdy głośnik chwilowo zaśnie.
+AUDIO_WANT_FILE = '/etc/anbernet-audio-want'
+
+
+def audio_want_mac():
+    try:
+        return Path(AUDIO_WANT_FILE).read_text().strip().upper() or None
+    except Exception:
+        return None
+
+
+def audio_want_set(mac):
+    if mac:
+        Path(AUDIO_WANT_FILE).write_text(mac.upper() + '\n')
+    else:
+        try:
+            Path(AUDIO_WANT_FILE).unlink()
+        except FileNotFoundError:
+            pass
 
 
 def wifi_radio_on() -> bool:
@@ -595,15 +617,21 @@ class WifiApp:
 
         trusted = dev.get('trusted')
         tr_txt = '…' if trusted is None else ('TAK' if trusted else 'NIE')
-        audio_on = audio_default_mac() == dev['mac'].upper()
+        audio_want = audio_want_mac() == dev['mac'].upper()
+        audio_live = audio_default_mac() == dev['mac'].upper()
+        if audio_want:
+            aud_row = ('(•) Dźwięk multimediów: AKTYWNE' if audio_live
+                       else '(•) Dźwięk multimediów: wstrzymane (rozłączony)')
+        else:
+            aud_row = '( ) Dźwięk multimediów → to urządzenie'
         rows = [
             f'(•) Zaufane / auto-łączenie: {tr_txt}'
             if trusted else f'( ) Zaufane / auto-łączenie: {tr_txt}',
-            '(•) Dźwięk multimediów → to urządzenie'
-            if audio_on else '( ) Dźwięk multimediów → to urządzenie',
+            aud_row,
             'Rozłącz' if dev['connected'] else 'Połącz',
             'Usuń sparowanie',
         ]
+        audio_on = audio_want   # kolor wiersza wg intencji
         for i, label in enumerate(rows):
             y = 104 + i * 34
             if i == self.bt_dcur:
@@ -736,18 +764,21 @@ class WifiApp:
                     dev['trusted'] = not cur
                     self._bt_start('trust_off' if cur else 'trust_on',
                                    dev['mac'], 'Zmieniam zaufanie...')
-                elif self.bt_dcur == 1:    # dźwięk multimediów (toggle natychmiastowy)
+                elif self.bt_dcur == 1:    # dźwięk multimediów — TRWAŁA INTENCJA
                     try:
-                        if audio_default_mac() == dev['mac'].upper():
+                        if audio_want_mac() == dev['mac'].upper():
+                            audio_want_set(None)
                             audio_default_set(None)
                             self.message = 'Dźwięk: głośniki wbudowane'
-                        elif not dev['connected']:
-                            # bez połączenia przekierowanie = cisza systemowa
-                            # (bt-audio-guard i tak by je zdjął po ~20 s)
-                            self.message = 'Najpierw POŁĄCZ urządzenie (pozycja niżej)'
                         else:
-                            audio_default_set(dev['mac'])
-                            self.message = 'Dźwięk multimediów → ' + dev['name'][:22]
+                            audio_want_set(dev['mac'])
+                            if dev['connected']:
+                                audio_default_set(dev['mac'])
+                                self.message = ('Dźwięk multimediów → '
+                                                + dev['name'][:22])
+                            else:
+                                self.message = ('Ustawione — wznowi się po '
+                                                'połączeniu urządzenia')
                     except Exception as ex:
                         self.message = f'błąd: {ex}'
                 elif self.bt_dcur == 2:    # połącz/rozłącz
