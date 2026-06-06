@@ -516,6 +516,18 @@ class WifiApp:
         except Exception as e:
             log(f'evdev FAIL: {e}')
 
+        # przycisk POWER (event0, KEY_POWER=116) — BEZ grab; krótkie wciśnięcie
+        # gasi panel LCD (fb0/blank=4, apka żyje — wzorzec z AnberMon),
+        # drugie wciśnięcie / dowolny przycisk pada budzi (blank=0)
+        self._pwr = None
+        self.screen_off = False
+        try:
+            import evdev as _ev
+            self._pwr = _ev.InputDevice('/dev/input/event0')
+            log('evdev pwr OK')
+        except Exception as e:
+            log(f'evdev pwr FAIL: {e}')
+
         # state
         self.mode     = 'list'      # 'list' lub 'password'
         self.tab      = 'wifi'      # 'wifi' lub 'bt' (L1/R1 przełącza)
@@ -1032,12 +1044,25 @@ class WifiApp:
                     sdl2.SDL_Delay(50)
                     continue
 
+            # przycisk POWER — toggle panelu LCD (oszczędzanie energii)
+            if self._pwr:
+                import select
+                if select.select([self._pwr.fd], [], [], 0)[0]:
+                    for e in self._pwr.read():
+                        if e.type == 1 and e.code == 116 and e.value == 1:
+                            self._set_screen(not self.screen_off)
+
             # evdev events
             if self._gp:
                 import select
                 if select.select([self._gp.fd], [], [], 0)[0]:
                     for e in self._gp.read():
                         if guard: continue
+                        # ekran zgaszony: dowolny przycisk pada tylko BUDZI
+                        if self.screen_off:
+                            if e.type == 1 and e.value == 1:
+                                self._set_screen(False)
+                            continue
                         if self.mode == 'list':
                             if self.tab == 'bt':
                                 self._handle_bt_event(e)
@@ -1253,10 +1278,25 @@ class WifiApp:
                     self.pw_kb_col = min(self.pw_kb_col, len(layout[self.pw_kb_row]) - 1)
                     self.render()
 
+    def _set_screen(self, off: bool):
+        """Panel LCD on/off przez /sys/class/graphics/fb0/blank
+        (4=display suspend przy żywym SDL, 0=on — wzorzec z AnberMon).
+        UWAGA: zawsze przywracać 0 przy wyjściu z aplikacji!"""
+        try:
+            with open('/sys/class/graphics/fb0/blank', 'w') as f:
+                f.write('4' if off else '0')
+            self.screen_off = off
+            log(f'screen {"OFF" if off else "ON"} (pwr toggle)')
+            if not off:
+                self.render()   # świeża klatka po obudzeniu
+        except Exception as e:
+            log(f'screen toggle FAIL: {e}')
+
     def quit(self):
         log('quit')
-        if getattr(self, '_screen_pwr', None) is not None:
-            self._screen_pwr.restore()
+        # KONIECZNIE przywróć panel — fb0/blank=4 po wyjściu = czarny ekran
+        if getattr(self, 'screen_off', False):
+            self._set_screen(False)
         if self._gp:
             try: self._gp.ungrab()
             except Exception: pass
