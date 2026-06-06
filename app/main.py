@@ -421,6 +421,85 @@ class BtOp(threading.Thread):
         self.done = True
 
 
+class BtVisibleJob(threading.Thread):
+    """TRYB WIDOCZNOŚCI — parowanie inicjowane Z ZEWNĄTRZ (samochód, telefon).
+    Radia samochodowe (np. Mazda) chcą same wyszukać urządzenie i wysłać
+    żądanie parowania; konsola musi być discoverable+pairable z agentem,
+    który potwierdzi kod. Sesja interaktywna bluetoothctl: auto-„yes" na
+    prompty, passkey łapany do wyświetlenia, po sparowaniu auto-trust."""
+
+    def __init__(self, timeout: int = 120):
+        super().__init__(daemon=True)
+        self.timeout = timeout
+        self.passkey = None
+        self.paired_mac = None
+        self.paired_name = ''
+        self.msg = 'czekam na żądanie parowania...'
+        self.done = False
+        self._proc = None
+
+    def run(self):
+        p = None
+        try:
+            p = subprocess.Popen(
+                [STDBUF, '-oL', BTCTL],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True)
+            self._proc = p
+            for c in ('agent KeyboardDisplay', 'default-agent',
+                      'pairable on', 'discoverable on'):
+                p.stdin.write(c + '\n')
+            p.stdin.flush()
+            killer = threading.Timer(self.timeout, p.kill)
+            killer.start()
+            for line in p.stdout:
+                log(f'bt vis: {line.rstrip()}')
+                m = re.search(r'[Pp]asskey[^0-9]*(\d{4,6})', line)
+                if m:
+                    self.passkey = m.group(1)
+                if '(yes/no)' in line or 'Confirm passkey' in line \
+                        or 'Authorize service' in line:
+                    try:
+                        p.stdin.write('yes\n')
+                        p.stdin.flush()
+                    except Exception:
+                        pass
+                m2 = re.search(r'Device ((?:[0-9A-F]{2}:){5}[0-9A-F]{2}) '
+                               r'Paired: yes', line)
+                if m2:
+                    self.paired_mac = m2.group(1)
+                    self.msg = 'SPAROWANO!'
+                    try:
+                        p.stdin.write(f'trust {self.paired_mac}\n')
+                        p.stdin.flush()
+                    except Exception:
+                        pass
+                    threading.Timer(3, p.kill).start()
+            p.wait(timeout=5)
+            killer.cancel()
+        except Exception as e:
+            self.msg = f'błąd: {e}'
+            try:
+                if p is not None:
+                    p.kill()
+            except Exception:
+                pass
+        # porządek: schowaj konsolę z eteru
+        btctl('discoverable', 'off', timeout=6)
+        if self.paired_mac:
+            self.msg = f'sparowano + trust ({self.paired_mac})'
+        elif not self.msg.startswith(('błąd', 'sparowano')):
+            self.msg = 'koniec widoczności (bez parowania)'
+        self.done = True
+
+    def stop(self):
+        try:
+            if self._proc is not None:
+                self._proc.kill()
+        except Exception:
+            pass
+
+
 class BtPairJob(threading.Thread):
     """Parowanie w tle: bluetoothctl z agentem KeyboardDisplay. Dla klawiatur
     BT bluez wyświetla PIN, który trzeba wpisać NA urządzeniu (i Enter) —
@@ -548,6 +627,7 @@ class WifiApp:
                                             # (R1 emituje DWA kody: 308 i 311)
         self.bt_detail = None               # urządzenie w widoku uprawnień
         self.bt_dcur = 0                    # kursor w widoku uprawnień
+        self.bt_visible: BtVisibleJob | None = None   # tryb widoczności
         self._wifi_on = None                # cache stanu radia WiFi
         self._bt_on = None                  # cache stanu adaptera BT
         # password mode
@@ -693,8 +773,34 @@ class WifiApp:
             self._text(8, H - 44, self.message, self.fsm, FG)
         self._text(8, H - 16, 'D-pad=wybór  A=przełącz/wykonaj  B=powrót', self.fsm, DIM)
 
+    def _render_bt_visible(self):
+        """Ekran trybu widoczności (parowanie z samochodu/telefonu)."""
+        d = self.draw
+        v = self.bt_visible
+
+        def _center(y, txt, font, col):
+            tw = font.getlength(txt)
+            self._text((W - int(tw)) // 2, y, txt, font, col)
+        _center(105, 'WIDOCZNOŚĆ WŁĄCZONA', self.flg, GRN)
+        _center(150, 'Konsola: „ANBERNIC"', self.fmd, FG)
+        _center(178, 'Na ekranie samochodu / telefonu wyszukaj', self.fmd, DIM)
+        _center(200, 'urządzenia i wybierz ANBERNIC', self.fmd, DIM)
+        if v.passkey:
+            _center(245, 'Kod parowania (potwierdź w aucie):', self.fmd, FG)
+            _center(280, v.passkey, self.flg, ACC)
+        if v.msg:
+            col = GRN if 'sparowano' in v.msg.lower() or 'SPAROWANO' in v.msg \
+                else FG
+            _center(330, v.msg[:50], self.fmd, col)
+        d.line([(0, H - 50), (W, H - 50)], fill=SEP, width=1)
+        self._text(8, H - 16, 'B=zakończ widoczność  (auto-koniec po 2 min '
+                   'lub po sparowaniu)', self.fsm, DIM)
+
     def _render_bt(self):
         d = self.draw
+        if self.bt_visible is not None and not self.bt_visible.done:
+            self._render_bt_visible()
+            return
         if self.bt_detail is not None:
             self._render_bt_detail()
             return
@@ -744,7 +850,7 @@ class WifiApp:
         if self.message:
             mc = RED if self.message.lower().startswith(('błąd', 'error')) else FG
             self._text(8, H - 44, self.message, self.fsm, mc)
-        legend = 'A=połącz/paruj B=skan X=usuń L2=opcje R2=BT on/off SELECT/START=zakładka'
+        legend = 'A=paruj B=skan X=usuń Y=widoczność L2=opcje R2=on/off SEL/START=zakładka'
         self._text(8, H - 16, legend, self.fsm, DIM)
 
     def _bt_start(self, kind: str, mac: str = '', msg: str = ''):
@@ -842,6 +948,16 @@ class WifiApp:
                 self.render()
 
     def _handle_bt_event(self, e):
+        # tryb widoczności: tylko B kończy (reszta ignorowana)
+        if self.bt_visible is not None and not self.bt_visible.done:
+            if e.type == 1 and e.value == 1:
+                if e.code in EXIT_KEYS:
+                    self.bt_visible.stop()
+                    self.mode = '__quit__'
+                elif e.code == KEY_B:
+                    self.bt_visible.stop()
+                    self.message = 'Widoczność wyłączona'
+            return
         if self.bt_detail is not None:
             self._handle_bt_detail_event(e)
             return
@@ -850,6 +966,11 @@ class WifiApp:
                 self.mode = '__quit__'
             elif self.bt_pair is not None and not self.bt_pair.done:
                 return  # w trakcie parowania ignoruj akcje
+            elif e.code == 306:           # fizyczne Y = tryb widoczności
+                self.bt_visible = BtVisibleJob()
+                self.bt_visible.start()
+                self.message = ''
+                self.render()
             elif e.code == KEY_A:
                 self.bt_action(); self.render()
             elif e.code == KEY_B:
@@ -1072,6 +1193,19 @@ class WifiApp:
                             self._handle_password_event(e)
                         if self.mode == '__quit__':
                             self.quit(); return
+
+            # tryb widoczności: żywy ekran (passkey/komunikaty) + finał
+            if self.bt_visible is not None:
+                if self.bt_visible.done:
+                    self.message = self.bt_visible.msg
+                    self.bt_visible = None
+                    self.bt_refresh()       # nowe urządzenie na liście
+                    if self.tab == 'bt':
+                        self.render()
+                elif self.tab == 'bt' and \
+                        time.time() - getattr(self, '_vis_ts', 0) > 1:
+                    self._vis_ts = time.time()
+                    self.render()
 
             # widok uprawnień: odświeżaj co 2 s — stan „Dźwięk multimediów"
             # zmienia w tle bt-audio-guard (zdejmuje przekierowanie po
