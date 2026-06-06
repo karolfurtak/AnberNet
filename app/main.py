@@ -593,7 +593,7 @@ class WifiApp:
         rows = [
             f'(•) Zaufane / auto-łączenie: {tr_txt}'
             if trusted else f'( ) Zaufane / auto-łączenie: {tr_txt}',
-            f'(•) Dźwięk multimediów → to urządzenie'
+            '(•) Dźwięk multimediów → to urządzenie'
             if audio_on else '( ) Dźwięk multimediów → to urządzenie',
             'Rozłącz' if dev['connected'] else 'Połącz',
             'Usuń sparowanie',
